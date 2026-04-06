@@ -1,3 +1,21 @@
+"""Инструменты портируемого движка запросов для Python-рабочего контура.
+
+Модуль реализует упрощенный runtime-слой поверх инвентарей команд и tools.
+Он отвечает за:
+
+- хранение состояния диалога;
+- учет ограничений по ходам и токенам;
+- формирование текстового или структурированного ответа;
+- восстановление и сохранение сессии;
+- выпуск краткой сводки по рабочему пространству.
+
+Основные сущности:
+
+- `QueryEngineConfig` — параметры выполнения;
+- `TurnResult` — результат одного хода;
+- `QueryEnginePort` — объект состояния и поведения движка.
+"""
+
 from __future__ import annotations
 
 import json
@@ -14,6 +32,16 @@ from .transcript import TranscriptStore
 
 @dataclass(frozen=True)
 class QueryEngineConfig:
+    """Конфигурация выполнения движка запросов.
+
+    Параметры:
+    - `max_turns`: максимально допустимое количество пользовательских ходов.
+    - `max_budget_tokens`: общий лимит токенов ввода и вывода.
+    - `compact_after_turns`: глубина хранения последних сообщений после компактации.
+    - `structured_output`: признак выдачи ответа в JSON-формате.
+    - `structured_retry_limit`: число повторных попыток сериализации структурированного ответа.
+    """
+
     max_turns: int = 8
     max_budget_tokens: int = 2000
     compact_after_turns: int = 12
@@ -23,6 +51,18 @@ class QueryEngineConfig:
 
 @dataclass(frozen=True)
 class TurnResult:
+    """Результат обработки одного пользовательского сообщения.
+
+    Параметры:
+    - `prompt`: исходный запрос пользователя.
+    - `output`: итоговый ответ движка.
+    - `matched_commands`: команды, сопоставленные маршрутизатором.
+    - `matched_tools`: инструменты, сопоставленные маршрутизатором.
+    - `permission_denials`: зафиксированные отказы по правам.
+    - `usage`: накопленная статистика использования.
+    - `stop_reason`: причина завершения обработки хода.
+    """
+
     prompt: str
     output: str
     matched_commands: tuple[str, ...]
@@ -34,6 +74,28 @@ class TurnResult:
 
 @dataclass
 class QueryEnginePort:
+    """Состояние и операции движка запросов.
+
+    Экземпляр объединяет конфигурацию, журнал сообщений, сведения об отказах
+    доступа и накопленную статистику использования.
+
+    Параметры:
+    - `manifest`: снимок структуры рабочего пространства.
+    - `config`: параметры выполнения движка.
+    - `session_id`: идентификатор сессии.
+    - `mutable_messages`: список пользовательских сообщений в активной сессии.
+    - `permission_denials`: накопленные отказы в доступе к инструментам.
+    - `total_usage`: суммарное потребление токенов.
+    - `transcript_store`: хранилище транскрипта сессии.
+
+    Пример:
+    ```python
+    engine = QueryEnginePort.from_workspace()
+    result = engine.submit_message("review MCP tool")
+    print(result.stop_reason)
+    ```
+    """
+
     manifest: PortManifest
     config: QueryEngineConfig = field(default_factory=QueryEngineConfig)
     session_id: str = field(default_factory=lambda: uuid4().hex)
@@ -44,10 +106,26 @@ class QueryEnginePort:
 
     @classmethod
     def from_workspace(cls) -> 'QueryEnginePort':
+        """Создает движок на основе актуального состояния рабочего пространства.
+
+        Возвращает:
+        - Экземпляр `QueryEnginePort` с новым идентификатором сессии и
+          конфигурацией по умолчанию.
+        """
+
         return cls(manifest=build_port_manifest())
 
     @classmethod
     def from_saved_session(cls, session_id: str) -> 'QueryEnginePort':
+        """Восстанавливает движок из ранее сохраненной сессии.
+
+        Параметры:
+        - `session_id`: идентификатор сохраненной сессии без расширения файла.
+
+        Возвращает:
+        - Экземпляр `QueryEnginePort`, восстановленный из файлового хранилища.
+        """
+
         stored = load_session(session_id)
         transcript = TranscriptStore(entries=list(stored.messages), flushed=True)
         return cls(
@@ -65,6 +143,23 @@ class QueryEnginePort:
         matched_tools: tuple[str, ...] = (),
         denied_tools: tuple[PermissionDenial, ...] = (),
     ) -> TurnResult:
+        """Обрабатывает одно сообщение и обновляет состояние сессии.
+
+        Параметры:
+        - `prompt`: текст сообщения пользователя.
+        - `matched_commands`: команды, заранее сопоставленные с запросом.
+        - `matched_tools`: инструменты, заранее сопоставленные с запросом.
+        - `denied_tools`: список отказов по правам, относящихся к запросу.
+
+        Возвращает:
+        - `TurnResult` с итоговым ответом, статистикой и причиной остановки.
+
+        Особенности:
+        - При достижении `max_turns` состояние сессии не изменяется.
+        - При превышении бюджета токенов в результате обработки причина
+          остановки меняется на `max_budget_reached`.
+        """
+
         if len(self.mutable_messages) >= self.config.max_turns:
             output = f'Max turns reached before processing prompt: {prompt}'
             return TurnResult(
@@ -110,6 +205,19 @@ class QueryEnginePort:
         matched_tools: tuple[str, ...] = (),
         denied_tools: tuple[PermissionDenial, ...] = (),
     ):
+        """Пошагово публикует события обработки сообщения.
+
+        Параметры:
+        - `prompt`: текст сообщения пользователя.
+        - `matched_commands`: предварительно сопоставленные команды.
+        - `matched_tools`: предварительно сопоставленные инструменты.
+        - `denied_tools`: отказы по правам, которые требуется отразить в потоке.
+
+        Возвращает:
+        - Генератор словарей событий в порядке `message_start`,
+          промежуточных событий и `message_stop`.
+        """
+
         yield {'type': 'message_start', 'session_id': self.session_id, 'prompt': prompt}
         if matched_commands:
             yield {'type': 'command_match', 'commands': matched_commands}
@@ -127,17 +235,29 @@ class QueryEnginePort:
         }
 
     def compact_messages_if_needed(self) -> None:
+        """Ограничивает объем хранимой истории в памяти и транскрипте."""
+
         if len(self.mutable_messages) > self.config.compact_after_turns:
             self.mutable_messages[:] = self.mutable_messages[-self.config.compact_after_turns :]
         self.transcript_store.compact(self.config.compact_after_turns)
 
     def replay_user_messages(self) -> tuple[str, ...]:
+        """Возвращает пользовательские сообщения, сохраненные в транскрипте."""
+
         return self.transcript_store.replay()
 
     def flush_transcript(self) -> None:
+        """Помечает транскрипт как сброшенный для последующей персистентности."""
+
         self.transcript_store.flush()
 
     def persist_session(self) -> str:
+        """Сохраняет активную сессию в файловое хранилище.
+
+        Возвращает:
+        - Путь к созданному JSON-файлу сессии.
+        """
+
         self.flush_transcript()
         path = save_session(
             StoredSession(
@@ -150,6 +270,8 @@ class QueryEnginePort:
         return str(path)
 
     def _format_output(self, summary_lines: list[str]) -> str:
+        """Преобразует внутреннюю сводку в текстовый или JSON-ответ."""
+
         if self.config.structured_output:
             payload = {
                 'summary': summary_lines,
@@ -159,6 +281,8 @@ class QueryEnginePort:
         return '\n'.join(summary_lines)
 
     def _render_structured_output(self, payload: dict[str, object]) -> str:
+        """Сериализует структурированный ответ с ограниченным числом повторов."""
+
         last_error: Exception | None = None
         for _ in range(self.config.structured_retry_limit):
             try:
@@ -169,6 +293,19 @@ class QueryEnginePort:
         raise RuntimeError('structured output rendering failed') from last_error
 
     def render_summary(self) -> str:
+        """Формирует Markdown-сводку по Python-рабочему пространству.
+
+        Возвращает:
+        - Текст Markdown со сведениями о manifest, command surface, tool
+          surface и текущем состоянии сессии.
+
+        Пример:
+        ```python
+        summary = QueryEnginePort.from_workspace().render_summary()
+        print(summary)
+        ```
+        """
+
         command_backlog = build_command_backlog()
         tool_backlog = build_tool_backlog()
         sections = [
