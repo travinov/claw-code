@@ -5,9 +5,9 @@
 1. Форк с документированным модулем:
 [https://github.com/travinov/claw-code](https://github.com/travinov/claw-code)
 2. Qwen extension:
-[https://github.com/travinov/qwen-sber-doc-extension](https://github.com/travinov/qwen-sber-doc-extension)
+[https://github.com/travinov/gigadoc-extension](https://github.com/travinov/gigadoc-extension)
 3. MCP tool server:
-[https://github.com/travinov/qwen-sber-doc-mcp](https://github.com/travinov/qwen-sber-doc-mcp)
+[https://github.com/travinov/gigadoc-mcp](https://github.com/travinov/gigadoc-mcp)
 
 ## Что сделано в форке `claw-code`
 
@@ -22,14 +22,14 @@
 1. Клонировать extension и MCP:
 
 ```bash
-git clone https://github.com/travinov/qwen-sber-doc-extension.git
-git clone https://github.com/travinov/qwen-sber-doc-mcp.git
+git clone https://github.com/travinov/gigadoc-extension.git
+git clone https://github.com/travinov/gigadoc-mcp.git
 ```
 
 2. Собрать MCP server:
 
 ```bash
-cd qwen-sber-doc-mcp
+cd gigadoc-mcp
 npm install
 npm run build
 ```
@@ -37,9 +37,9 @@ npm run build
 3. Подключить extension к Qwen:
 
 ```bash
-cd ../qwen-sber-doc-extension
+cd ../gigadoc-extension
 qwen extensions link .
-export QWEN_SBER_DOC_MCP_ENTRY="/absolute/path/to/qwen-sber-doc-mcp/dist/src/index.js"
+export GIGADOC_MCP_ENTRY="/absolute/path/to/gigadoc-mcp/dist/src/index.js"
 ```
 
 4. Использовать в Qwen CLI:
